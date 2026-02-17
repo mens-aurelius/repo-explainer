@@ -12,3 +12,10 @@ A tiny CLI that fetches a GitHub repo README and prints a quick engineering-styl
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+
+## Usage
+
+```bash
+python3 main.py pallets/flask
+
