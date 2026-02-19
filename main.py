@@ -5,17 +5,15 @@ import re
 import warnings
 from collections import Counter
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import requests
 
 API = "https://api.github.com"
 
 # Suppress noisy warning on some macOS Python builds (LibreSSL vs OpenSSL).
-# This does not affect correctness of the tool.
 try:
     from urllib3.exceptions import NotOpenSSLWarning  # type: ignore
-
     warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 except Exception:
     pass
@@ -68,9 +66,6 @@ def fetch_default_branch(sess: requests.Session, repo: Repo) -> str:
 
 
 def fetch_readme_raw(sess: requests.Session, repo: Repo) -> str:
-    """
-    Fetch README content as raw text. README may not exist; return empty string.
-    """
     url = f"{API}/repos/{repo.owner}/{repo.name}/readme"
     headers = dict(sess.headers)
     headers["Accept"] = "application/vnd.github.v3.raw"
@@ -86,9 +81,6 @@ def fetch_readme_raw(sess: requests.Session, repo: Repo) -> str:
 
 
 def fetch_tree(sess: requests.Session, repo: Repo, branch: str) -> List[dict]:
-    """
-    Fetch repo file tree (recursive) using Git Trees API.
-    """
     ref = gh_json(sess, f"{API}/repos/{repo.owner}/{repo.name}/git/refs/heads/{branch}")
     sha = (ref.get("object") or {}).get("sha")
     if not sha:
@@ -99,10 +91,6 @@ def fetch_tree(sess: requests.Session, repo: Repo, branch: str) -> List[dict]:
 
 
 def summarize_purpose(readme: str) -> str:
-    """
-    Extract a 1-liner purpose summary from README.
-    Skips logos/badges/HTML and tries to find the first sentence-like line.
-    """
     if not readme:
         return "No README found."
 
@@ -110,21 +98,14 @@ def summarize_purpose(readme: str) -> str:
 
     def is_noise(ln: str) -> bool:
         l = ln.lower()
-
-        # headings
         if ln.startswith("#"):
             return True
-
-        # badges / shields / common badge providers
         if "shields.io" in l or l.startswith("[![") or l.startswith("![]("):
             return True
         if "travis-ci" in l or "circleci" in l or "github.com/actions" in l:
             return True
-
-        # html-ish / images / logo blocks
         if "<img" in l or "<div" in l or "</div>" in l or l.startswith("<"):
             return True
-
         return False
 
     for ln in lines[:250]:
@@ -138,24 +119,15 @@ def summarize_purpose(readme: str) -> str:
 
 
 def summarize_run_snippets(readme: str, max_snippets: int = 2) -> List[str]:
-    """
-    Pull a couple of code blocks that look like install/run commands or quickstarts.
-    Cleans out a leading 'python'/'bash' line that sometimes appears.
-    """
     if not readme:
         return []
-
     blocks = re.findall(r"```(?:bash|sh|shell|console|python)?\s*(.*?)```", readme, flags=re.DOTALL | re.IGNORECASE)
-
     snippets: List[str] = []
     for b in blocks:
         b = b.strip()
-        # Strip accidental leading language tag line inside the captured block
         b = re.sub(r"^(python|bash|sh|shell|console)\s*\n", "", b, flags=re.IGNORECASE)
-
         if any(x in b for x in ["pip install", "python", "npm install", "yarn", "pnpm", "cargo", "go run", "docker"]):
             snippets.append(b)
-
     return snippets[:max_snippets]
 
 
@@ -169,17 +141,12 @@ def top_level_folder_counts(tree_items: List[dict]) -> Counter:
 
 
 def infer_stack(readme: str, tree_items: List[dict]) -> List[str]:
-    """
-    Infer stack from strong file signals + weaker README keyword signals.
-    Avoid broad extension matches to reduce false positives.
-    """
     text = (readme or "").lower()
     paths = [(it.get("path") or "").lower() for it in tree_items]
     joined = "\n".join(paths)
 
     score = Counter()
 
-    # Strong file signals (avoid broad extensions like .rs/.cs)
     file_signals = {
         "python": ["pyproject.toml", "requirements.txt", "setup.py", "setup.cfg", "pipfile", "poetry.lock"],
         "javascript": ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"],
@@ -191,7 +158,6 @@ def infer_stack(readme: str, tree_items: List[dict]) -> List[str]:
         "dotnet": [".sln", ".csproj", "global.json"],
         "docker": ["dockerfile", "docker-compose.yml", "compose.yml"],
         "terraform": [".tf"],
-        # Only call kubernetes if these specific indicators are present
         "kubernetes": ["kustomization.yaml", "chart.yaml", "helm/"],
     }
 
@@ -199,7 +165,6 @@ def infer_stack(readme: str, tree_items: List[dict]) -> List[str]:
         if any(s in joined for s in sigs):
             score[label] += 3
 
-    # Weaker README signals
     readme_signals = {
         "python": ["pip install", "python -m", "venv", "pytest", "pypi", "conda"],
         "javascript": ["npm install", "yarn", "pnpm", "node", "npx"],
@@ -216,7 +181,6 @@ def infer_stack(readme: str, tree_items: List[dict]) -> List[str]:
         if any(s in text for s in sigs):
             score[label] += 1
 
-    # Prefer react if it appears alongside ts/js
     if score["react"] and (score["typescript"] or score["javascript"]):
         score["react"] += 1
 
@@ -224,22 +188,17 @@ def infer_stack(readme: str, tree_items: List[dict]) -> List[str]:
 
 
 def infer_architecture(tree_items: List[dict]) -> Tuple[List[str], List[str]]:
-    """
-    Simple, safe heuristics based on top-level folder patterns and common files.
-    """
     paths = [(it.get("path") or "") for it in tree_items]
     lower = [p.lower() for p in paths]
     tops = top_level_folder_counts(tree_items)
 
     notes: List[str] = []
 
-    # Language/project patterns (use exact files)
     if "package.json" in lower:
         notes.append("Node/JS project (package.json present).")
     if any(p.endswith("pyproject.toml") for p in lower) or any(p.endswith("requirements.txt") for p in lower):
         notes.append("Python project (pyproject/requirements present).")
 
-    # Layout patterns
     if "src" in tops:
         notes.append("src/ present (common for application/library code).")
     if "apps" in tops and "packages" in tops:
@@ -262,6 +221,74 @@ def infer_architecture(tree_items: List[dict]) -> Tuple[List[str], List[str]]:
     return notes, top_folders
 
 
+def ai_explain(
+    repo: Repo,
+    readme: str,
+    stack: List[str],
+    arch_notes: List[str],
+    top_folders: List[str],
+    snippets: List[str],
+) -> Optional[str]:
+    """
+    Optional AI enhancement. Requires OPENAI_API_KEY env var and the `openai` package.
+    Returns a markdown-ish string to print, or None if unavailable.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        from openai import OpenAI
+    except Exception:
+        return None
+
+    client = OpenAI(api_key=api_key)
+
+    # Keep prompt small to control cost and speed
+    readme_trim = "\n".join(readme.splitlines()[:180]) if readme else ""
+
+    prompt = f"""
+You are an expert developer. Explain this GitHub repository for a new but technical user.
+
+Repo: {repo.owner}/{repo.name}
+Inferred stack: {", ".join(stack) if stack else "unknown"}
+Top folders: {", ".join(top_folders) if top_folders else "unknown"}
+Architecture signals: {", ".join(arch_notes) if arch_notes else "none"}
+
+README (truncated):
+{readme_trim}
+
+If you reference commands, keep them short and safe.
+Output format:
+
+## AI Summary
+- 1-2 sentences on what it does
+
+## Key Features
+- 3-6 bullets
+
+## Who It's For
+- 2-4 bullets
+
+## How to Run (best guess)
+- 3-6 bullets with commands if obvious, otherwise say "see README"
+
+## Repo Shape
+- short bullets on code layout and where to look first
+""".strip()
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "Be concise, accurate, and avoid guessing beyond evidence."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+
+    return resp.choices[0].message.content.strip() if resp.choices else None
+
+
 def render(
     repo: Repo,
     branch: str,
@@ -270,6 +297,7 @@ def render(
     arch_notes: List[str],
     top_folders: List[str],
     snippets: List[str],
+    ai_text: Optional[str],
 ) -> None:
     print(f"🔎 Repo: {repo.owner}/{repo.name} (branch: {branch})\n")
 
@@ -295,6 +323,9 @@ def render(
     else:
         print("- No obvious run/install snippets detected in README.")
 
+    if ai_text:
+        print("\n" + ai_text)
+
     print("\n✅ Next simple upgrades")
     print("- Add --json output for structured consumption.")
     print("- Add --top N to control folder list length.")
@@ -302,8 +333,9 @@ def render(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Explain a GitHub repo via README + file tree heuristics.")
+    parser = argparse.ArgumentParser(description="Explain a GitHub repo via README + file tree heuristics (optional AI).")
     parser.add_argument("repo", help="Repo in owner/repo form (e.g., pallets/flask)")
+    parser.add_argument("--ai", action="store_true", help="Add AI-generated explanation (requires OPENAI_API_KEY).")
     args = parser.parse_args()
 
     try:
@@ -327,7 +359,13 @@ def main() -> None:
     arch_notes, top_folders = infer_architecture(tree)
     snippets = summarize_run_snippets(readme)
 
-    render(repo, branch, summary, stack, arch_notes, top_folders, snippets)
+    ai_text = None
+    if args.ai:
+        ai_text = ai_explain(repo, readme, stack, arch_notes, top_folders, snippets)
+        if ai_text is None:
+            print("ℹ️  AI mode unavailable. Set OPENAI_API_KEY and `pip install openai`.\n")
+
+    render(repo, branch, summary, stack, arch_notes, top_folders, snippets, ai_text)
 
 
 if __name__ == "__main__":
