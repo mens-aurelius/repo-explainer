@@ -288,6 +288,69 @@ Output format:
 
     return resp.choices[0].message.content.strip() if resp.choices else None
 
+def ai_deep_architecture(
+    repo: Repo,
+    tree_items: List[dict],
+    stack: List[str],
+    arch_notes: List[str],
+) -> Optional[str]:
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        from openai import OpenAI
+    except Exception:
+        return None
+
+    client = OpenAI(api_key=api_key)
+
+    # summarize file tree for AI
+    paths = [it.get("path", "") for it in tree_items]
+    top_paths = "\n".join(paths[:200])  # avoid huge prompts
+
+    prompt = f"""
+You are a senior software architect onboarding a new engineer.
+
+Explain how this repository is structured and how someone should navigate it.
+
+Repo: {repo.owner}/{repo.name}
+Stack: {", ".join(stack)}
+Architecture signals: {", ".join(arch_notes)}
+
+Important file paths:
+{top_paths}
+
+Output:
+
+## Architecture Overview
+- explain core components
+
+## Where to Start Reading Code
+- first files/modules
+
+## Key Subsystems
+- what each major folder does
+
+## How Data / Requests Flow
+- high level
+
+## If I Had 30 Minutes To Understand This Repo
+- step by step reading order
+"""
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "Be concrete and technical."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+
+    return resp.choices[0].message.content.strip()
+
 
 def render(
     repo: Repo,
@@ -298,6 +361,7 @@ def render(
     top_folders: List[str],
     snippets: List[str],
     ai_text: Optional[str],
+    deep_text: Optional[str],
 ) -> None:
     print(f"🔎 Repo: {repo.owner}/{repo.name} (branch: {branch})\n")
 
@@ -336,6 +400,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Explain a GitHub repo via README + file tree heuristics (optional AI).")
     parser.add_argument("repo", help="Repo in owner/repo form (e.g., pallets/flask)")
     parser.add_argument("--ai", action="store_true", help="Add AI-generated explanation (requires OPENAI_API_KEY).")
+    parser.add_argument("--deep", action="store_true", help="Deep architecture AI analysis")
     args = parser.parse_args()
 
     try:
@@ -365,7 +430,14 @@ def main() -> None:
         if ai_text is None:
             print("ℹ️  AI mode unavailable. Set OPENAI_API_KEY and `pip install openai`.\n")
 
-    render(repo, branch, summary, stack, arch_notes, top_folders, snippets, ai_text)
+    if args.deep:
+        deep_text = ai_deep_architecture(repo, tree, stack, arch_notes)
+        if deep_text is None:
+            print("ℹ️  Deep architecture AI mode unavailable. Set OPENAI_API_KEY and `pip install openai`.\n")
+
+    ai_text = deep_text if args.deep else ai_text
+
+    render(repo, branch, summary, stack, arch_notes, top_folders, snippets, ai_text, deep_text)
 
 
 if __name__ == "__main__":
